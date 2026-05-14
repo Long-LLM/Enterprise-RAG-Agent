@@ -1,0 +1,51 @@
+# ===========================================
+# Enterprise RAG Agent - Docker Compose
+# ===========================================
+# 当前版本：Milvus 使用外部服务（需单独部署 Milvus Standalone）
+# Ollama 假设运行在宿主机或单独容器中
+# 
+# Milvus 快速启动参考：
+#   wget https://github.com/milvus-io/milvus/releases/download/v2.4.0/milvus-standalone-docker-compose.yml -O milvus-docker-compose.yml
+#   docker compose -f milvus-docker-compose.yml up -d
+# ===========================================
+
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: rag-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - ./uploads:/app/uploads
+      - ./.env:/app/.env:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # 如需在同一 compose 中运行 Ollama，取消以下注释：
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: rag-ollama
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama-data:/root/.ollama
+  #   restart: unless-stopped
+  #   networks:
+  #     - rag-network
+
+networks:
+  rag-network:
+    driver: bridge
+
+# volumes:
+#   ollama-data:

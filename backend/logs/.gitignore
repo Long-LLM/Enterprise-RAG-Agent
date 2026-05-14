@@ -1,0 +1,3 @@
+# 日志文件不上传 Git
+*
+!.gitignore

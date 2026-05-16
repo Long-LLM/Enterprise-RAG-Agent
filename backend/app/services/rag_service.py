@@ -25,7 +25,49 @@ settings = get_settings()
 class RAGService:
     """
     RAG 问答服务
+    支持意图判断：区分知识库问答 vs 闲聊/问候/感谢
     """
+
+    # ---------- 意图判断 ----------
+
+    # 规则匹配：常见闲聊关键词（快速路径，不走 LLM 判断）
+    CHITCHAT_KEYWORDS = {
+        "你好", "您好", "嗨", "hello", "hi", "hey",
+        "再见", "拜拜", "bye", "goodbye",
+        "谢谢", "感谢", "thx", "thanks", "thank you",
+        "你是谁", "你能做什么", "介绍一下自己", "你是谁啊",
+        "早上好", "下午好", "晚上好", "晚安",
+        "在吗", "在嘛", "有人吗", "hello?",
+        "ok", "好的", "知道了", "明白", "收到",
+    }
+
+    INTENT_PROMPT = """判断用户问题的意图。只需回答一个JSON。
+
+分类规则：
+- "retrieve": 需要查询知识库才能回答的问题（如政策、流程、文档内容、事实性问题）
+- "chat": 闲聊、问候、感谢、自我介绍请求、与知识库无关的通用对话
+
+示例：
+- "你好" -> {"intent": "chat", "reason": "问候语"}
+- "公司的年假政策是什么？" -> {"intent": "retrieve", "reason": "需要查询公司政策文档"}
+- "谢谢" -> {"intent": "chat", "reason": "感谢语"}
+- "你是谁" -> {"intent": "chat", "reason": "询问助手身份"}
+- "这个产品的价格是多少？" -> {"intent": "retrieve", "reason": "需要查询产品文档"}
+- "帮我总结一下这段内容" -> {"intent": "retrieve", "reason": "需要基于已有文档总结"}
+
+用户问题：{question}
+
+请输出JSON（不要markdown代码块）：
+{"intent": "chat 或 retrieve", "reason": "简要说明"}"""
+
+    CHAT_SYSTEM_PROMPT = """你是一个友好、专业的企业助手。用户的问题不需要查询知识库，请直接自然地回答。
+
+回答规则：
+1. 友好、简洁、专业
+2. 如果是问候，礼貌回应并简要说明自己是企业知识库助手
+3. 如果是感谢，礼貌接受
+4. 不要编造不存在的文档或信息
+5. 如果用户询问你能做什么，简要说明可以基于企业知识库回答文档相关问题"""
 
     SYSTEM_PROMPT_TEMPLATE = """你是一个企业知识库助手，专门基于提供的参考文档回答用户问题。
 
@@ -45,67 +87,114 @@ class RAGService:
         self.retriever = get_hybrid_retriever()
         self.reranker = get_reranker_service()
 
-    @log_performance(level=20, log_args=False)
-    async def query(self, req: QueryRequest, history_messages: Optional[List[ChatMessage]] = None) -> dict:
+    # ---------- 意图判断 ----------
+
+    def _is_chitchat_by_rule(self, question: str) -> bool:
+        """规则匹配：常见闲聊/问候/感谢语"""
+        q = question.strip().lower()
+        # 完全匹配关键词
+        if q in self.CHITCHAT_KEYWORDS:
+            return True
+        # 长度极短（<=6 字）且不含问号，大概率是问候或简短回应
+        if len(question.strip()) <= 6 and "?" not in question and "？" not in question:
+            return True
+        return False
+
+    async def _detect_intent(self, question: str) -> tuple:
         """
-        非流式 RAG 查询
-        :param history_messages: 历史对话消息（用于多轮对话上下文）
-        :return: {answer, sources, model, processing_time_ms}
+        意图判断
+        :return: (needs_retrieve: bool, reason: str)
         """
-        start_time = time.time()
+        # 1. 规则快速路径
+        if self._is_chitchat_by_rule(question):
+            logger.info(f"意图判断(规则): '{question}' -> 闲聊")
+            return False, "规则命中：问候/感谢/闲聊"
 
-        # 1. 问题改写
-        rewritten_queries = await self._rewrite_query(req.question, history_messages)
-
-        # 2. 多查询混合检索（对每个改写查询分别检索，合并去重）
-        candidates = await self._multi_query_retrieve(
-            queries=rewritten_queries,
-            top_k_vector=settings.TOP_K_VECTOR,
-            top_k_bm25=settings.TOP_K_BM25,
-            filters=self._build_filter(req.filters),
-        )
-
-        # 3. 重排序
-        if req.use_rerank and candidates:
-            candidates = await self.reranker.rerank(
-                query=req.question,
-                candidates=candidates,
-                top_k=settings.TOP_K_RERANK,
+        # 2. LLM 判断（轻量级，temperature=0）
+        try:
+            prompt = self.INTENT_PROMPT.format(question=question)
+            resp = await self.llm.chat(
+                messages=[ChatMessage(role="user", content=prompt)],
+                temperature=0.0,
+                max_tokens=128,
+                stream=False,
             )
-        else:
-            candidates = candidates[: req.top_k]
+            import json
+            text = resp.strip()
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0].strip()
+            data = json.loads(text)
+            intent = data.get("intent", "retrieve")
+            reason = data.get("reason", "")
+            needs_retrieve = intent == "retrieve"
+            logger.info(f"意图判断(LLM): '{question}' -> {'检索' if needs_retrieve else '闲聊'} ({reason})")
+            return needs_retrieve, reason
+        except Exception as e:
+            logger.warning(f"意图判断(LLM)失败，默认走检索: {e}")
+            return True, "意图判断失败，默认检索"
 
-        # 4. 构造 Prompt
-        context, sources = self._build_context(candidates)
-        system_prompt = self.SYSTEM_PROMPT_TEMPLATE.format(context=context)
+    # ---------- 闲聊直接回答 ----------
 
-        # 5. LLM 生成（带上历史上下文）
+    async def _chat_direct(self, req: QueryRequest, history_messages: Optional[List[ChatMessage]] = None) -> dict:
+        """不走检索，直接用通用助手回答"""
+        start_time = time.time()
         messages = list(history_messages) if history_messages else []
         messages.append(ChatMessage(role="user", content=req.question))
         answer = await self.llm.chat(
             messages=messages,
-            system_prompt=system_prompt,
-            temperature=0.3,  # RAG 回答需要稳定
+            system_prompt=self.CHAT_SYSTEM_PROMPT,
+            temperature=0.7,
             max_tokens=2048,
             stream=False,
         )
-
-        processing_time = (time.time() - start_time) * 1000
-
         return {
             "answer": answer.strip(),
-            "sources": sources,
+            "sources": [],
             "model": settings.OLLAMA_LLM_MODEL if settings.LLM_PROVIDER == "ollama" else settings.VLLM_MODEL,
-            "processing_time_ms": round(processing_time, 2),
+            "processing_time_ms": round((time.time() - start_time) * 1000, 2),
         }
 
+    async def _chat_direct_stream(self, req: QueryRequest, history_messages: Optional[List[ChatMessage]] = None) -> AsyncIterator[str]:
+        """不走检索，直接流式回答"""
+        start_time = time.time()
+        messages = list(history_messages) if history_messages else []
+        messages.append(ChatMessage(role="user", content=req.question))
+
+        import json
+        # 空 sources
+        meta = json.dumps({"type": "sources", "data": []}, ensure_ascii=False)
+        yield f"data: {meta}\n\n"
+
+        async for chunk in self.llm.chat_stream(
+            messages=messages,
+            system_prompt=self.CHAT_SYSTEM_PROMPT,
+            temperature=0.7,
+            max_tokens=2048,
+        ):
+            payload = json.dumps({"type": "token", "data": chunk}, ensure_ascii=False)
+            yield f"data: {payload}\n\n"
+
+        done_payload = json.dumps(
+            {"type": "done", "processing_time_ms": round((time.time() - start_time) * 1000, 2)},
+            ensure_ascii=False,
+        )
+        yield f"data: {done_payload}\n\n"
+
+    # ---------- 主入口 ----------
+
     @log_performance(level=20, log_args=False)
-    async def query_stream(self, req: QueryRequest, history_messages: Optional[List[ChatMessage]] = None) -> AsyncIterator[str]:
+    async def query(self, req: QueryRequest, history_messages: Optional[List[ChatMessage]] = None) -> dict:
         """
-        流式 RAG 查询
-        返回 SSE 格式的文本流
-        :param history_messages: 历史对话消息（用于多轮对话上下文）
+        非流式 RAG 查询（带意图判断）
         """
+        # 0. 意图判断
+        needs_retrieve, reason = await self._detect_intent(req.question)
+        if not needs_retrieve:
+            return await self._chat_direct(req, history_messages)
+
+        # --- 以下走完整 RAG 流程 ---
         start_time = time.time()
 
         # 1. 问题改写
@@ -133,29 +222,85 @@ class RAGService:
         context, sources = self._build_context(candidates)
         system_prompt = self.SYSTEM_PROMPT_TEMPLATE.format(context=context)
 
-        # 先返回 sources JSON（前端可提前渲染引用）
-        import json
+        # 5. LLM 生成
+        messages = list(history_messages) if history_messages else []
+        messages.append(ChatMessage(role="user", content=req.question))
+        answer = await self.llm.chat(
+            messages=messages,
+            system_prompt=system_prompt,
+            temperature=0.3,
+            max_tokens=2048,
+            stream=False,
+        )
 
+        processing_time = (time.time() - start_time) * 1000
+
+        return {
+            "answer": answer.strip(),
+            "sources": sources,
+            "model": settings.OLLAMA_LLM_MODEL if settings.LLM_PROVIDER == "ollama" else settings.VLLM_MODEL,
+            "processing_time_ms": round(processing_time, 2),
+        }
+
+    @log_performance(level=20, log_args=False)
+    async def query_stream(self, req: QueryRequest, history_messages: Optional[List[ChatMessage]] = None) -> AsyncIterator[str]:
+        """
+        流式 RAG 查询（带意图判断）
+        """
+        # 0. 意图判断
+        needs_retrieve, reason = await self._detect_intent(req.question)
+        if not needs_retrieve:
+            async for chunk in self._chat_direct_stream(req, history_messages):
+                yield chunk
+            return
+
+        # --- 以下走完整 RAG 流程 ---
+        start_time = time.time()
+
+        # 1. 问题改写
+        rewritten_queries = await self._rewrite_query(req.question, history_messages)
+
+        # 2. 多查询混合检索
+        candidates = await self._multi_query_retrieve(
+            queries=rewritten_queries,
+            top_k_vector=settings.TOP_K_VECTOR,
+            top_k_bm25=settings.TOP_K_BM25,
+            filters=self._build_filter(req.filters),
+        )
+
+        # 3. 重排序
+        if req.use_rerank and candidates:
+            candidates = await self.reranker.rerank(
+                query=req.question,
+                candidates=candidates,
+                top_k=settings.TOP_K_RERANK,
+            )
+        else:
+            candidates = candidates[: req.top_k]
+
+        # 4. 构造 Prompt
+        context, sources = self._build_context(candidates)
+        system_prompt = self.SYSTEM_PROMPT_TEMPLATE.format(context=context)
+
+        # 先返回 sources JSON
+        import json
         meta = json.dumps({"type": "sources", "data": [s.model_dump() for s in sources]}, ensure_ascii=False)
         yield f"data: {meta}\n\n"
 
-        # 5. 流式生成（带上历史上下文）
+        # 5. 流式生成
         messages = list(history_messages) if history_messages else []
         messages.append(ChatMessage(role="user", content=req.question))
-        buffer = ""
         async for chunk in self.llm.chat_stream(
             messages=messages,
             system_prompt=system_prompt,
             temperature=0.3,
             max_tokens=2048,
         ):
-            buffer += chunk
             payload = json.dumps({"type": "token", "data": chunk}, ensure_ascii=False)
             yield f"data: {payload}\n\n"
 
-        processing_time = (time.time() - start_time) * 1000
         done_payload = json.dumps(
-            {"type": "done", "processing_time_ms": round(processing_time, 2)},
+            {"type": "done", "processing_time_ms": round((time.time() - start_time) * 1000, 2)},
             ensure_ascii=False,
         )
         yield f"data: {done_payload}\n\n"
@@ -345,12 +490,22 @@ class RAGService:
         return context, sources
 
 
-# 全局单例
+# 全局单例（已迁移到 app.container，保留此函数兼容现有代码）
 _rag_service: RAGService | None = None
 
 
 def get_rag_service() -> RAGService:
     global _rag_service
+    try:
+        from app.container import container, ensure_registered
+        ensure_registered()
+        return container.resolve(RAGService)
+    except Exception as e:
+        import traceback
+        from app.logger import get_logger
+        logger = get_logger(__name__)
+        logger.error(f"Container resolve RAGService failed: {e}")
+        traceback.print_exc()
     if _rag_service is None:
         _rag_service = RAGService()
     return _rag_service

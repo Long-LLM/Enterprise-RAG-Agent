@@ -684,6 +684,21 @@ class MetadataStore:
                 for r in rows
             ]
 
+    async def delete_user(self, user_id: str) -> bool:
+        """删除用户及其权限"""
+        async with self.async_session() as session:
+            from sqlalchemy import delete
+            # 先删除权限
+            await session.execute(
+                delete(UserDocPermissionModel).where(UserDocPermissionModel.user_id == user_id)
+            )
+            # 再删除用户
+            result = await session.execute(
+                delete(UserModel).where(UserModel.user_id == user_id)
+            )
+            await session.commit()
+            return result.rowcount > 0
+
     async def close(self):
         await self.engine.dispose()
 

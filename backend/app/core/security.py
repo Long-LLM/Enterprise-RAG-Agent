@@ -21,10 +21,25 @@ from app.logger import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
-# 从环境变量读取，如无则使用默认（生产环境必须配置）
-SECRET_KEY = getattr(settings, "SECRET_KEY", "enterprise-rag-agent-secret-key-change-me")
+SECRET_KEY = settings.SECRET_KEY
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 7
+
+# 生产环境启动时校验密钥强度
+_default_keys = {
+    "enterprise-rag-agent-secret-key-change-me",
+    "change-me-in-production-to-a-random-string-at-least-32-chars",
+    "",
+}
+if SECRET_KEY in _default_keys or len(SECRET_KEY) < 32:
+    import warnings
+
+    warnings.warn(
+        "SECURITY WARNING: SECRET_KEY 使用默认值或长度不足 32 位。"
+        "请在 .env 文件中设置强密钥（openssl rand -hex 32），否则 JWT Token 可被伪造。",
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security_scheme = HTTPBearer(auto_error=False)

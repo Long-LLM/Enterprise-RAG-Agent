@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "./uploads"
     LOG_LEVEL: str = "INFO"
 
+    # --- Security ---
+    # JWT 签名密钥，生产环境必须修改，长度 >= 32
+    SECRET_KEY: str = "enterprise-rag-agent-secret-key-change-me"
+
     # --- Milvus ---
     MILVUS_HOST: str = "192.168.184.128"
     MILVUS_PORT: str = "19530"
@@ -75,6 +79,8 @@ class Settings(BaseSettings):
     BAICHUAN_MAX_FILE_SIZE: int = 5 * 1024 * 1024  # 5MB
 
     # --- Metadata DB ---
+    # SQLite for dev, PostgreSQL for production via docker-compose
+    # Format: postgresql+asyncpg://user:pass@host:port/db
     METADATA_DB_URL: str = "sqlite+aiosqlite:///./metadata.db"
 
     # --- Chunking ---

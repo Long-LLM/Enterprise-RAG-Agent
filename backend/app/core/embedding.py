@@ -8,6 +8,7 @@ from typing import List, Union
 import httpx
 
 from app.config import get_settings
+from app.core.metrics import EMBEDDING_DURATION, EMBEDDING_REQUESTS, EMBEDDING_BATCH_SIZE
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -33,8 +34,11 @@ class EmbeddingService:
         :param texts: 单条文本或文本列表
         :return: 单条向量或向量列表
         """
+        import time
+        start = time.time()
         single = isinstance(texts, str)
         input_texts = [texts] if single else texts
+        batch_label = "single" if single else "batch"
 
         try:
             payload = {
@@ -52,12 +56,20 @@ class EmbeddingService:
             if not embeddings:
                 raise ValueError(f"Ollama 返回空 embeddings: {result}")
 
+            # Metrics
+            duration = time.time() - start
+            EMBEDDING_DURATION.labels(model=self.model, batch_size=batch_label).observe(duration)
+            EMBEDDING_REQUESTS.labels(model=self.model, status="success").inc()
+            if not single:
+                EMBEDDING_BATCH_SIZE.observe(len(input_texts))
+
             # Ollama /api/embed 返回格式: { "embeddings": [[...], [...]] }
             if single:
                 return embeddings[0]
             return embeddings
 
         except Exception as e:
+            EMBEDDING_REQUESTS.labels(model=self.model, status="error").inc()
             logger.error(f"Embedding 请求失败: {e}")
             raise
 
@@ -100,12 +112,18 @@ class EmbeddingService:
         await self._client.aclose()
 
 
-# 全局单例
+# 全局单例（已迁移到 app.container，保留此函数兼容现有代码）
 _embedding_service: EmbeddingService | None = None
 
 
 def get_embedding_service() -> EmbeddingService:
     global _embedding_service
+    try:
+        from app.container import container, ensure_registered
+        ensure_registered()
+        return container.resolve(EmbeddingService)
+    except Exception:
+        pass
     if _embedding_service is None:
         _embedding_service = EmbeddingService()
     return _embedding_service

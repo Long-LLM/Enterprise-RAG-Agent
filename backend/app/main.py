@@ -6,15 +6,18 @@ from contextlib import asynccontextmanager
 
 from pathlib import Path
 
+import time
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import auth, chunk_preview, conversation, document, health, permission, query, upload
 from app.config import get_settings
 from app.core.embedding import get_embedding_service
 from app.core.llm import get_llm_service
+from app.core.metrics import get_metrics_response, observe_http_request, CONTENT_TYPE
 from app.core.milvus_store import get_milvus_store
 from app.logger import get_logger, set_trace_id, LoggingMiddleware
 
@@ -47,9 +50,8 @@ async def lifespan(app: FastAPI):
     # 关闭
     logger.info("[STOP] RAG Agent 关闭中...")
     try:
-        await get_embedding_service().close()
-        await get_llm_service().close()
-        get_milvus_store().close()
+        from app.container import container
+        await container.close_all()
     except Exception:
         pass
     logger.info("[OK] 资源已释放")
@@ -63,6 +65,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Metrics 中间件：记录请求延迟和计数
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    duration = time.time() - start
+    observe_http_request(
+        method=request.method,
+        path=request.url.path,
+        status_code=response.status_code,
+        duration=duration,
+    )
+    return response
+
 # 日志中间件（必须在 CORS 之前，确保 Trace ID 最早生成）
 app.add_middleware(LoggingMiddleware)
 
@@ -74,6 +90,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------- Metrics 端点 ----------
+@app.get("/metrics")
+async def metrics():
+    """Prometheus 抓取端点"""
+    return Response(content=get_metrics_response(), media_type=CONTENT_TYPE)
 
 
 # ---------- 全局异常处理 ----------

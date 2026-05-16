@@ -345,12 +345,21 @@ class MilvusStore:
         self.client.close()
 
 
-# 全局单例
+# 全局单例（已迁移到 app.container，保留此函数兼容现有代码）
 _milvus_store: MilvusStore | None = None
 
 
 def get_milvus_store() -> MilvusStore:
+    """获取 MilvusStore 实例（优先使用容器注册表）"""
     global _milvus_store
+    # 检查容器是否已注册/覆盖
+    try:
+        from app.container import container, ensure_registered
+        ensure_registered()
+        return container.resolve(MilvusStore)
+    except Exception:
+        pass
+    # 回退到模块级单例
     if _milvus_store is None:
         _milvus_store = MilvusStore()
     return _milvus_store

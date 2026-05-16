@@ -4,11 +4,13 @@ LLM 服务统一接口层
 未来：无缝切换 vLLM（通过配置 LLM_PROVIDER=vllm）
 """
 import json
+import time
 from typing import AsyncIterator, List, Optional
 
 import httpx
 
 from app.config import Settings, get_settings
+from app.core.metrics import LLM_DURATION, LLM_REQUESTS, LLM_TOKENS_GENERATED
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -57,12 +59,29 @@ class LLMService:
         """
         非流式对话调用，返回完整回复文本
         """
-        if self.provider == "ollama":
-            return await self._chat_ollama(messages, system_prompt, temperature, max_tokens, stream=False)
-        elif self.provider == "vllm":
-            return await self._chat_vllm(messages, system_prompt, temperature, max_tokens, stream=False)
-        else:
-            raise ValueError(f"不支持的 LLM Provider: {self.provider}")
+        start = time.time()
+        status = "success"
+        try:
+            if self.provider == "ollama":
+                result = await self._chat_ollama(messages, system_prompt, temperature, max_tokens, stream=False)
+            elif self.provider == "vllm":
+                result = await self._chat_vllm(messages, system_prompt, temperature, max_tokens, stream=False)
+            else:
+                raise ValueError(f"不支持的 LLM Provider: {self.provider}")
+
+            # Metrics
+            duration = time.time() - start
+            LLM_DURATION.labels(provider=self.provider, model=self.ollama_model, endpoint="chat").observe(duration)
+            LLM_REQUESTS.labels(provider=self.provider, model=self.ollama_model, endpoint="chat", status="success").inc()
+            # 估算 token 数 (中文字符约1token，英文约4字符1token)
+            estimated_tokens = len(result) // 2
+            LLM_TOKENS_GENERATED.labels(provider=self.provider, model=self.ollama_model).inc(estimated_tokens)
+
+            return result
+        except Exception as e:
+            status = "error"
+            LLM_REQUESTS.labels(provider=self.provider, model=self.ollama_model, endpoint="chat", status="error").inc()
+            raise
 
     async def chat_stream(
         self,
@@ -74,14 +93,29 @@ class LLMService:
         """
         流式对话调用，逐字返回生成内容（SSE 格式）
         """
-        if self.provider == "ollama":
-            async for chunk in self._chat_ollama_stream(messages, system_prompt, temperature, max_tokens):
-                yield chunk
-        elif self.provider == "vllm":
-            async for chunk in self._chat_vllm_stream(messages, system_prompt, temperature, max_tokens):
-                yield chunk
-        else:
-            raise ValueError(f"不支持的 LLM Provider: {self.provider}")
+        start = time.time()
+        total_chars = 0
+        try:
+            if self.provider == "ollama":
+                async for chunk in self._chat_ollama_stream(messages, system_prompt, temperature, max_tokens):
+                    total_chars += len(chunk)
+                    yield chunk
+            elif self.provider == "vllm":
+                async for chunk in self._chat_vllm_stream(messages, system_prompt, temperature, max_tokens):
+                    total_chars += len(chunk)
+                    yield chunk
+            else:
+                raise ValueError(f"不支持的 LLM Provider: {self.provider}")
+
+            # Metrics (流式在结束时记录)
+            duration = time.time() - start
+            LLM_DURATION.labels(provider=self.provider, model=self.ollama_model, endpoint="chat_stream").observe(duration)
+            LLM_REQUESTS.labels(provider=self.provider, model=self.ollama_model, endpoint="chat_stream", status="success").inc()
+            estimated_tokens = total_chars // 2
+            LLM_TOKENS_GENERATED.labels(provider=self.provider, model=self.ollama_model).inc(estimated_tokens)
+        except Exception:
+            LLM_REQUESTS.labels(provider=self.provider, model=self.ollama_model, endpoint="chat_stream", status="error").inc()
+            raise
 
     # ---------- Ollama 实现 ----------
 
@@ -237,12 +271,18 @@ class LLMService:
         await self._client.aclose()
 
 
-# 全局单例
+# 全局单例（已迁移到 app.container，保留此函数兼容现有代码）
 _llm_service: LLMService | None = None
 
 
 def get_llm_service() -> LLMService:
     global _llm_service
+    try:
+        from app.container import container, ensure_registered
+        ensure_registered()
+        return container.resolve(LLMService)
+    except Exception:
+        pass
     if _llm_service is None:
         _llm_service = LLMService()
     return _llm_service

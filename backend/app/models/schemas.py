@@ -241,6 +241,31 @@ class MyPermissionListResponse(BaseResponse):
     data: List[MyPermissionDocInfo]
 
 
+# ========================== 异步任务 ==========================
+
+class AsyncTaskStatusResponse(BaseResponse):
+    class TaskData(BaseModel):
+        task_id: str
+        status: str  # PENDING / STARTED / PROGRESS / SUCCESS / FAILURE / RETRY
+        result: Optional[dict] = None
+        progress: Optional[int] = None
+        stage: Optional[str] = None
+        message: Optional[str] = None
+        doc_id: Optional[str] = None
+
+    data: TaskData
+
+
+class AsyncUploadResponse(BaseResponse):
+    class UploadTaskData(BaseModel):
+        task_id: str
+        doc_id: str
+        filename: str
+        status: str = "PENDING"
+
+    data: UploadTaskData
+
+
 # ========================== 系统健康 ==========================
 
 class HealthCheckResponse(BaseResponse):

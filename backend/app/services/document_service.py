@@ -270,12 +270,18 @@ class DocumentService:
         return all_chunks
 
 
-# 全局单例
+# 全局单例（已迁移到 app.container，保留此函数兼容现有代码）
 _document_service: DocumentService | None = None
 
 
 def get_document_service() -> DocumentService:
     global _document_service
+    try:
+        from app.container import container, ensure_registered
+        ensure_registered()
+        return container.resolve(DocumentService)
+    except Exception:
+        pass
     if _document_service is None:
         _document_service = DocumentService()
     return _document_service

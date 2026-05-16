@@ -71,7 +71,7 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Document, Plus } from '@element-plus/icons-vue'
-import { listDocuments, deleteDocument } from '../api/api.js'
+import { listDocuments, deleteDocument } from '../api/api'
 
 const documents = ref([])
 const loading = ref(false)

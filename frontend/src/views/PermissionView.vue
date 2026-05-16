@@ -106,7 +106,7 @@ import {
   listPublicDocuments,
   setPublicDocument,
   revokePublicDocument,
-} from '../api/api.js'
+} from '../api/api'
 
 const users = ref([])
 const documents = ref([])

@@ -63,7 +63,7 @@
         <template v-else>
           <div
             v-for="(msg, idx) in messages"
-            :key="idx"
+            :key="msg.id || idx"
             :class="['msg-row', msg.role]"
           >
             <!-- AI 消息：头像在左 -->
@@ -75,7 +75,10 @@
               </div>
               <div class="msg-body">
                 <div class="msg-bubble ai-bubble">
-                  <div class="ai-text" v-html="renderMarkdown(msg.content)"></div>
+                  <div v-if="msg.content" class="ai-text" v-html="renderMarkdown(msg.content)"></div>
+                  <div v-else-if="msg.streaming" class="typing-indicator">
+                    <span></span><span></span><span></span>
+                  </div>
 
                   <!-- 引用来源 -->
                   <div v-if="msg.sources?.length" class="sources-section">
@@ -211,7 +214,7 @@
 <script setup>
 import { ref, nextTick, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { query, createConversation, listConversations, getConversation, deleteConversation } from '../api/api.js'
+import { query, createConversation, listConversations, getConversation, deleteConversation } from '../api/api'
 import { marked } from 'marked'
 
 const messages = ref([])
@@ -320,7 +323,8 @@ const switchConversation = async (conversationId) => {
   try {
     const { data } = await getConversation(conversationId)
     if (data.code === 200 && data.data.messages) {
-      messages.value = data.data.messages.map(m => ({
+      messages.value = data.data.messages.map((m, i) => ({
+        id: conversationId + '-' + i,
         role: m.role,
         content: m.content,
         sources: m.sources || [],
@@ -368,7 +372,7 @@ const sendMessage = async (text) => {
   inputText.value = ''
   if (textareaRef.value) textareaRef.value.style.height = 'auto'
 
-  messages.value.push({ role: 'user', content: text })
+  messages.value.push({ id: Date.now(), role: 'user', content: text })
   loading.value = true
   scrollToBottom()
 
@@ -408,6 +412,7 @@ const sendMessage = async (text) => {
         conversation_id: conversationId,
       })
       messages.value.push({
+        id: Date.now(),
         role: 'assistant',
         content: data.data.answer,
         sources: data.data.sources,
@@ -418,6 +423,7 @@ const sendMessage = async (text) => {
   } catch (err) {
     ElMessage.error('请求失败')
     messages.value.push({
+      id: Date.now(),
       role: 'assistant',
       content: '抱歉，请求处理失败，请稍后重试。',
       showSources: false,
@@ -452,11 +458,22 @@ const sendStream = async (text, conversationId) => {
     throw new Error(`HTTP ${resp.status}: ${resp.statusText}${errText ? ' - ' + errText : ''}`)
   }
 
+  // 预先创建 assistant 消息占位，避免中途 push 导致渲染抖动
+  const msgIdx = messages.value.length
+  messages.value.push({
+    id: Date.now(),
+    role: 'assistant',
+    content: '',
+    sources: [],
+    showSources: false,
+    streaming: true,
+  })
+  loading.value = false  // 隐藏 loading 行，由消息气泡中的 typing-indicator 替代
+
   const reader = resp.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
   let gotDone = false
-  let msgIdx = -1  // -1 表示尚未创建 assistant 消息
 
   while (true) {
     const { done, value } = await reader.read()
@@ -471,20 +488,12 @@ const sendStream = async (text, conversationId) => {
         try {
           const payload = JSON.parse(line.slice(6))
           if (payload.type === 'token') {
-            // 收到第一个 token 时才创建 assistant 消息，避免空气泡
-            if (msgIdx === -1) {
-              msgIdx = messages.value.length
-              messages.value.push({ role: 'assistant', content: '', sources: [], showSources: false })
-            }
             messages.value[msgIdx].content += payload.data
           } else if (payload.type === 'sources') {
-            if (msgIdx !== -1) {
-              messages.value[msgIdx].sources = payload.data
-            }
+            messages.value[msgIdx].sources = payload.data
           } else if (payload.type === 'done') {
-            if (msgIdx !== -1) {
-              messages.value[msgIdx].time = payload.processing_time_ms
-            }
+            messages.value[msgIdx].time = payload.processing_time_ms
+            messages.value[msgIdx].streaming = false
             gotDone = true
           }
         } catch {}
@@ -498,21 +507,17 @@ const sendStream = async (text, conversationId) => {
     try {
       const payload = JSON.parse(buffer.slice(6))
       if (payload.type === 'done') {
-        if (msgIdx !== -1) {
-          messages.value[msgIdx].time = payload.processing_time_ms
-        }
+        messages.value[msgIdx].time = payload.processing_time_ms
+        messages.value[msgIdx].streaming = false
         gotDone = true
       }
     } catch {}
   }
 
-  // 如果流结束但没有任何 token，给出友好提示
-  if (msgIdx === -1) {
-    messages.value.push({
-      role: 'assistant',
-      content: '抱歉，未收到有效的回复内容，请稍后重试或检查服务状态。',
-      showSources: false,
-    })
+  // 流结束但未收到任何 token，给出友好提示
+  if (!messages.value[msgIdx].content && !gotDone) {
+    messages.value[msgIdx].content = '抱歉，未收到有效的回复内容，请稍后重试或检查服务状态。'
+    messages.value[msgIdx].streaming = false
   }
 }
 
@@ -528,7 +533,8 @@ onMounted(async () => {
       try {
         const { data } = await getConversation(savedId)
         if (data.code === 200 && data.data.messages) {
-          messages.value = data.data.messages.map(m => ({
+          messages.value = data.data.messages.map((m, i) => ({
+            id: savedId + '-' + i,
             role: m.role,
             content: m.content,
             sources: m.sources || [],

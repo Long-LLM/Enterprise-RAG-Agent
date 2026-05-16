@@ -70,7 +70,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { checkHealth, listMyPermissions } from './api/api.js'
+import { checkHealth, listMyPermissions } from './api/api'
 
 const router = useRouter()
 

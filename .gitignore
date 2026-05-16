@@ -1,12 +1,118 @@
-/.env
-/.vscode
-/attu.py
-/check_connections.py
-/RAG原理讲解.md
-/test_pipeline.py
-/write_doc.py
-/xlsx_preview.txt
-/《三国演义》.txt
-/企业信息_提取.txt
-/企业工程化落地流程.md
-/常见问答对.xlsx
+# ===========================================
+# Python
+# ===========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+build/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+sdist/
+wheels/
+.pytest_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.cache
+coverage.xml
+*.cover
+.hypothesis/
+
+# ===========================================
+# Virtual environments
+# ===========================================
+.venv/
+venv/
+ENV/
+env/
+
+# ===========================================
+# Secrets / Environment
+# ===========================================
+.env
+.env.local
+.env.*.local
+# 注意：.env.example 是模板，需要提交
+
+# ===========================================
+# Node / Vite / TypeScript
+# ===========================================
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+.npm/
+.yarn/
+
+# ===========================================
+# Database / Cache / Uploads (runtime data)
+# ===========================================
+*.db
+*.sqlite
+*.sqlite3
+metadata.db
+test_metadata.db
+backend/uploads/
+backend/logs/
+uploads/
+logs/
+*.log
+
+# ===========================================
+# Celery
+# ===========================================
+celerybeat-schedule
+celerybeat.pid
+
+# ===========================================
+# IDE / Editor
+# ===========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===========================================
+# Project-specific dev/utility scripts
+# ===========================================
+attu.py
+check_connections.py
+test_pipeline.py
+test_query.py
+test_milvus_connection.py
+test_ollama_connection.py
+test_pgsql_connection.py
+write_doc.py
+
+# Backend ad-hoc test scripts (local debugging only)
+# Note: backend/test_permissions.py 和 test_query_stream.py 保留（在 CLAUDE.md 中文档化）
+backend/test_conn.py
+backend/test_container.py
+backend/test_fastapi_import.py
+backend/test_gpu_speed.py
+backend/test_ollama_speed.py
+backend/test_ollama_stream.py
+
+# ===========================================
+# Sample data files (not for repo)
+# ===========================================
+xlsx_preview.txt
+《三国演义》.txt
+企业信息_提取.txt
+常见问答对.xlsx
+
+# ===========================================
+# Claude Code workspace
+# ===========================================
+.claude/

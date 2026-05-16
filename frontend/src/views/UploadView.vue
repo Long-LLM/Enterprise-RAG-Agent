@@ -183,6 +183,25 @@
           </div>
         </div>
 
+        <!-- 上传模式选择 -->
+        <div class="mode-section" v-if="selectedFile">
+          <h4>上传模式</h4>
+          <el-radio-group v-model="uploadMode" size="small">
+            <el-radio-button label="sync">
+              <el-icon><Timer /></el-icon> 同步（小文件）
+            </el-radio-button>
+            <el-radio-button label="async">
+              <el-icon><Clock /></el-icon> 异步（大文件推荐）
+            </el-radio-button>
+          </el-radio-group>
+          <p v-if="autoAsync" class="mode-hint">
+            文件超过 10MB，已自动切换为异步模式
+          </p>
+          <p v-else class="mode-hint">
+            {{ uploadMode === 'async' ? '后台处理，可离开页面，通过任务状态查看进度' : '即时处理，完成后返回结果' }}
+          </p>
+        </div>
+
         <!-- 文档标题 -->
         <div class="title-section" v-if="selectedFile">
           <h4>文档标题</h4>
@@ -206,13 +225,43 @@
             :icon="Upload"
             :disabled="chunkList.length === 0"
           >
-            {{ uploading ? '入库中...' : '确认入库' }}
+            {{ uploadBtnText }}
           </el-button>
         </div>
 
-        <!-- 上传结果 -->
+        <!-- 异步任务状态 -->
+        <div v-if="taskId" class="task-status-card">
+          <h4>处理进度</h4>
+          <div class="task-meta">
+            <el-tag size="small">任务ID: {{ taskId.slice(0, 12) }}...</el-tag>
+            <el-tag :type="taskStatusType" size="small">{{ taskStatusText }}</el-tag>
+          </div>
+          <el-progress
+            v-if="taskProgress !== null"
+            :percentage="taskProgress"
+            :status="taskProgressStatus"
+            :stroke-width="10"
+            striped
+            striped-flow
+          />
+          <p v-if="taskMessage" class="task-message">{{ taskMessage }}</p>
+          <div v-if="taskResult" class="task-result">
+            <el-result
+              :icon="taskResult.icon"
+              :title="taskResult.title"
+              :sub-title="taskResult.subtitle"
+            >
+              <template #extra>
+                <el-button type="primary" @click="reset">继续上传</el-button>
+                <el-button @click="$router.push('/query')">去问答</el-button>
+              </template>
+            </el-result>
+          </div>
+        </div>
+
+        <!-- 同步上传结果 -->
         <el-result
-          v-if="result"
+          v-if="result && !taskId"
           :icon="result.icon"
           :title="result.title"
           :sub-title="result.subtitle"
@@ -242,10 +291,10 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed, watch, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { UploadFilled, Document, Close, Refresh, Upload, ArrowRight } from '@element-plus/icons-vue'
-import { uploadDocument, previewChunks } from '../api/api.js'
+import { UploadFilled, Document, Close, Refresh, Upload, ArrowRight, Timer, Clock } from '@element-plus/icons-vue'
+import { uploadDocument, uploadDocumentAsync, getTaskStatus, previewChunks } from '../api/api'
 import ChunkPreviewPanel from '../components/ChunkPreviewPanel.vue'
 
 const formats = ['PDF', 'DOCX', 'PPTX', 'XLSX', 'CSV', 'JSON', 'TXT', 'MD', 'HTML', 'EPUB']
@@ -297,6 +346,15 @@ const uploading = ref(false)
 const previewing = ref(false)
 const result = ref(null)
 
+// 异步上传状态
+const uploadMode = ref('sync')  // 'sync' | 'async'
+const taskId = ref(null)
+const taskStatus = ref(null)
+const taskProgress = ref(null)
+const taskMessage = ref('')
+const taskResult = ref(null)
+let pollTimer = null
+
 const chunkList = ref([])
 const previewStats = ref(null)
 const previewStrategy = ref('')
@@ -310,6 +368,51 @@ const form = reactive({
 })
 
 const deptMode = ref('existing')  // 'existing' | 'new'
+
+// 文件超过 10MB 自动切换异步
+const ASYNC_THRESHOLD = 10 * 1024 * 1024
+const autoAsync = computed(() => selectedFile.value?.size > ASYNC_THRESHOLD)
+
+watch(autoAsync, (isLarge) => {
+  if (isLarge) uploadMode.value = 'async'
+})
+
+const uploadBtnText = computed(() => {
+  if (uploading.value) {
+    return uploadMode.value === 'async' ? '提交任务中...' : '入库中...'
+  }
+  return uploadMode.value === 'async' ? '后台入库' : '确认入库'
+})
+
+const taskStatusText = computed(() => {
+  const map = {
+    PENDING: '等待中',
+    STARTED: '已开始',
+    PROGRESS: '处理中',
+    SUCCESS: '已完成',
+    FAILURE: '失败',
+    RETRY: '重试中',
+  }
+  return map[taskStatus.value] || taskStatus.value || '未知'
+})
+
+const taskStatusType = computed(() => {
+  const map = {
+    PENDING: 'info',
+    STARTED: 'warning',
+    PROGRESS: 'warning',
+    SUCCESS: 'success',
+    FAILURE: 'danger',
+    RETRY: 'danger',
+  }
+  return map[taskStatus.value] || 'info'
+})
+
+const taskProgressStatus = computed(() => {
+  if (taskStatus.value === 'FAILURE') return 'exception'
+  if (taskStatus.value === 'SUCCESS') return 'success'
+  return ''
+})
 
 const userInfo = ref({})
 try {
@@ -328,7 +431,7 @@ const departmentOptions = ref([])
 const loadDepartments = async () => {
   if (!isAdmin.value) return
   try {
-    const { data } = await import('../api/api.js').then(m => m.listDepartments())
+    const { data } = await import('../api/api').then(m => m.listDepartments())
     departmentOptions.value = data.data || []
   } catch {
     departmentOptions.value = []
@@ -432,30 +535,109 @@ const doPreview = async () => {
   }
 }
 
+// ---------- 异步上传轮询 ----------
+
+const startPolling = (id) => {
+  if (pollTimer) clearInterval(pollTimer)
+  pollTimer = setInterval(async () => {
+    try {
+      const { data } = await getTaskStatus(id)
+      const task = data.data
+      taskStatus.value = task.status
+      taskProgress.value = task.progress || (task.status === 'SUCCESS' ? 100 : task.status === 'FAILURE' ? 0 : null)
+      taskMessage.value = task.message || ''
+
+      if (task.status === 'SUCCESS') {
+        clearInterval(pollTimer)
+        pollTimer = null
+        taskResult.value = {
+          icon: 'success',
+          title: '文档入库完成',
+          subtitle: `任务 ${id.slice(0, 12)}... 处理成功，共 ${task.result?.chunk_count || '?'} 个分块`,
+        }
+        ElMessage.success('异步入库任务完成')
+      } else if (task.status === 'FAILURE') {
+        clearInterval(pollTimer)
+        pollTimer = null
+        taskResult.value = {
+          icon: 'error',
+          title: '入库失败',
+          subtitle: task.message || '异步任务执行失败',
+        }
+        ElMessage.error('异步入库任务失败')
+      }
+    } catch (err) {
+      console.error('轮询任务状态失败:', err)
+    }
+  }, 2000)  // 每 2 秒轮询一次
+}
+
 const submitUpload = async () => {
   if (!selectedFile.value) return
   uploading.value = true
   result.value = null
+  taskId.value = null
+  taskStatus.value = null
+  taskProgress.value = null
+  taskMessage.value = ''
+  taskResult.value = null
 
   try {
-    const res = await uploadDocument(selectedFile.value, form.title, form.strategy, form.params, form.department)
-    result.value = {
-      icon: 'success',
-      title: '文档入库完成',
-      subtitle: `共生成 ${res.data.data.chunk_count} 个文本分块，已存入向量库`,
+    if (uploadMode.value === 'async') {
+      // 异步上传
+      const res = await uploadDocumentAsync(
+        selectedFile.value,
+        form.title,
+        form.strategy,
+        form.params,
+        form.department,
+      )
+      const data = res.data.data
+      taskId.value = data.task_id
+      taskStatus.value = 'PENDING'
+      taskProgress.value = 0
+      taskMessage.value = '任务已提交，正在排队...'
+      ElMessage.success(`异步任务已提交: ${data.task_id.slice(0, 12)}...`)
+      startPolling(data.task_id)
+    } else {
+      // 同步上传
+      const res = await uploadDocument(
+        selectedFile.value,
+        form.title,
+        form.strategy,
+        form.params,
+        form.department,
+      )
+      result.value = {
+        icon: 'success',
+        title: '文档入库完成',
+        subtitle: `共生成 ${res.data.data.chunk_count} 个文本分块，已存入向量库`,
+      }
+      ElMessage.success('入库成功')
     }
-    ElMessage.success('入库成功')
   } catch (err) {
-    result.value = {
-      icon: 'error',
-      title: '入库失败',
-      subtitle: err.response?.data?.message || err.message,
+    if (uploadMode.value === 'async') {
+      taskResult.value = {
+        icon: 'error',
+        title: '提交失败',
+        subtitle: err.response?.data?.message || err.message,
+      }
+    } else {
+      result.value = {
+        icon: 'error',
+        title: '入库失败',
+        subtitle: err.response?.data?.message || err.message,
+      }
     }
-    ElMessage.error('入库失败')
+    ElMessage.error(uploadMode.value === 'async' ? '任务提交失败' : '入库失败')
   } finally {
     uploading.value = false
   }
 }
+
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+})
 
 const reset = () => {
   selectedFile.value = null
@@ -467,6 +649,16 @@ const reset = () => {
   form.params = {}
   form.department = ''
   deptMode.value = 'existing'
+  uploadMode.value = 'sync'
+  taskId.value = null
+  taskStatus.value = null
+  taskProgress.value = null
+  taskMessage.value = ''
+  taskResult.value = null
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
 }
 </script>
 
@@ -863,5 +1055,57 @@ const reset = () => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+/* 上传模式选择 */
+.mode-section {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.mode-section h4 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 16px;
+}
+
+.mode-hint {
+  color: #94a3b8;
+  font-size: 13px;
+  margin-top: 10px;
+}
+
+/* 任务状态卡片 */
+.task-status-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.task-status-card h4 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 12px;
+}
+
+.task-meta {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.task-message {
+  color: #64748b;
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+.task-result {
+  margin-top: 16px;
 }
 </style>
